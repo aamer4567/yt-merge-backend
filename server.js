@@ -4,20 +4,13 @@ const ffmpeg = require("fluent-ffmpeg");
 const fs = require("fs");
 const path = require("path");
 const crypto = require("crypto");
-const http = require("http");
-const https = require("https");
 
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "1mb" }));
 
 const PORT = process.env.PORT || 3000;
-
-const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
-
-const RAPIDAPI_HOST =
-    "youtube-media-downloader.p.rapidapi.com";
 
 const TEMP_DIR = "/tmp/vidssave";
 
@@ -29,270 +22,80 @@ if (!fs.existsSync(TEMP_DIR)) {
 
 const jobs = new Map();
 
-
-/* =========================================================
-   ROOT
-========================================================= */
+/*
+=========================================================
+ROOT
+=========================================================
+*/
 
 app.get("/", (req, res) => {
-
-    res.send(
-        "VidsSave Backend is Running!"
-    );
-
+    res.json({
+        service: "VidsSave Media Processing API",
+        status: "running",
+        version: "4.0.0"
+    });
 });
 
 
-/* =========================================================
-   HEALTH
-========================================================= */
+/*
+=========================================================
+HEALTH
+=========================================================
+*/
 
 app.get("/health", (req, res) => {
 
     res.json({
-
         status: "ok",
-
-        rapidApiKeyConfigured:
-            !!RAPIDAPI_KEY,
-
         ffmpeg: true,
-
-        uptime:
-            Math.round(process.uptime())
-
+        uptime: Math.floor(process.uptime())
     });
 
 });
 
 
-/* =========================================================
-   VIDEO DETAILS
-========================================================= */
-
-app.get("/video", async (req, res) => {
-
-    try {
-
-        const videoId =
-            String(req.query.videoId || "").trim();
-
-
-        if (!videoId) {
-
-            return res.status(400).json({
-
-                error:
-                    "videoId required hai."
-
-            });
-
-        }
-
-
-        if (!RAPIDAPI_KEY) {
-
-            return res.status(500).json({
-
-                error:
-                    "RAPIDAPI_KEY Render Environment mein configured nahi hai."
-
-            });
-
-        }
-
-
-        const apiUrl =
-            `https://${RAPIDAPI_HOST}/v2/video/details` +
-            `?videoId=${encodeURIComponent(videoId)}` +
-            `&urlAccess=normal` +
-            `&videos=auto` +
-            `&audios=auto`;
-
-
-        console.log(
-            "Fetching video details:",
-            videoId
-        );
-
-
-        const response =
-            await fetch(apiUrl, {
-
-                method: "GET",
-
-                headers: {
-
-                    "x-rapidapi-key":
-                        RAPIDAPI_KEY,
-
-                    "x-rapidapi-host":
-                        RAPIDAPI_HOST,
-
-                    "Content-Type":
-                        "application/json"
-
-                }
-
-            });
-
-
-        const text =
-            await response.text();
-
-
-        let data;
-
-
-        try {
-
-            data =
-                JSON.parse(text);
-
-        } catch {
-
-            console.error(
-                "RapidAPI raw response:",
-                text.substring(0, 1000)
-            );
-
-            return res.status(502).json({
-
-                error:
-                    "RapidAPI ne valid JSON response nahi diya."
-
-            });
-
-        }
-
-
-        if (!response.ok) {
-
-            console.error(
-                "RapidAPI error:",
-                response.status,
-                data
-            );
-
-            return res.status(response.status).json({
-
-                error:
-                    "RapidAPI request failed.",
-
-                details:
-                    data
-
-            });
-
-        }
-
-
-        if (!data.title) {
-
-            return res.status(404).json({
-
-                error:
-                    "Video information nahi mili."
-
-            });
-
-        }
-
-
-        /*
-         * Debug ke liye important:
-         * videos.items / audios.items ka count
-         */
-
-        console.log(
-            "Video formats:",
-            data.videos &&
-            Array.isArray(data.videos.items)
-                ? data.videos.items.length
-                : 0
-        );
-
-
-        console.log(
-            "Audio formats:",
-            data.audios &&
-            Array.isArray(data.audios.items)
-                ? data.audios.items.length
-                : 0
-        );
-
-
-        res.json(data);
-
-
-    } catch (error) {
-
-        console.error(
-            "Video API error:",
-            error
-        );
-
-
-        res.status(500).json({
-
-            error:
-                "Video information fetch nahi ho saki.",
-
-            details:
-                error.message
-
-        });
-
-    }
-
-});
-
-
-/* =========================================================
-   MERGE
-========================================================= */
+/*
+=========================================================
+CREATE VIDEO + AUDIO MERGE JOB
+=========================================================
+*/
 
 app.get("/merge", async (req, res) => {
 
     try {
 
-        const videoUrl =
-            String(req.query.videoUrl || "").trim();
-
-        const audioUrl =
-            String(req.query.audioUrl || "").trim();
-
-        const title =
-            String(req.query.title || "video").trim();
+        const {
+            videoUrl,
+            audioUrl,
+            title
+        } = req.query;
 
 
         if (!videoUrl || !audioUrl) {
 
             return res.status(400).json({
-
                 error:
                     "videoUrl aur audioUrl dono required hain."
-
             });
 
         }
 
 
-        /*
-         * Security:
-         * Sirf HTTP/HTTPS URLs allow.
-         */
-
-        if (
-            !isHttpUrl(videoUrl) ||
-            !isHttpUrl(audioUrl)
-        ) {
+        if (!isHttpUrl(videoUrl)) {
 
             return res.status(400).json({
-
                 error:
-                    "Invalid media URL."
+                    "Invalid video URL."
+            });
 
+        }
+
+
+        if (!isHttpUrl(audioUrl)) {
+
+            return res.status(400).json({
+                error:
+                    "Invalid audio URL."
             });
 
         }
@@ -309,36 +112,38 @@ app.get("/merge", async (req, res) => {
             );
 
 
+        const safeTitle =
+            cleanFilename(
+                title || "video"
+            );
+
+
         jobs.set(jobId, {
 
-            id:
-                jobId,
+            id: jobId,
 
-            status:
-                "processing",
+            type: "merge",
 
-            progress:
-                0,
+            status: "processing",
+
+            progress: 0,
 
             stage:
-                "FFmpeg processing start ho rahi hai...",
+                "Video + Audio processing start ho rahi hai...",
 
             outputFile,
 
-            title:
-                cleanFilename(title),
+            title: safeTitle,
 
-            error:
-                null,
+            error: null,
 
-            createdAt:
-                Date.now()
+            createdAt: Date.now()
 
         });
 
 
         console.log(
-            `Starting merge job: ${jobId}`
+            `Merge job started: ${jobId}`
         );
 
 
@@ -352,8 +157,7 @@ app.get("/merge", async (req, res) => {
 
         res.json({
 
-            success:
-                true,
+            success: true,
 
             jobId
 
@@ -363,7 +167,7 @@ app.get("/merge", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "Merge start error:",
+            "Merge creation error:",
             error
         );
 
@@ -371,10 +175,7 @@ app.get("/merge", async (req, res) => {
         res.status(500).json({
 
             error:
-                "Merge start nahi ho saka.",
-
-            details:
-                error.message
+                "Merge job create nahi ho saka."
 
         });
 
@@ -383,350 +184,341 @@ app.get("/merge", async (req, res) => {
 });
 
 
-/* =========================================================
-   MERGE STATUS
-========================================================= */
+/*
+=========================================================
+CREATE MP3 JOB
+=========================================================
+*/
 
-app.get(
-    "/merge-status/:jobId",
-    (req, res) => {
+app.get("/mp3", async (req, res) => {
 
-        const job =
-            jobs.get(
-                req.params.jobId
-            );
+    try {
+
+        const {
+            audioUrl,
+            title
+        } = req.query;
 
 
-        if (!job) {
+        if (!audioUrl) {
 
-            return res.status(404).json({
-
+            return res.status(400).json({
                 error:
-                    "Merge job nahi mila."
-
+                    "audioUrl required hai."
             });
 
         }
 
 
-        res.json({
+        if (!isHttpUrl(audioUrl)) {
 
-            success:
-                true,
+            return res.status(400).json({
+                error:
+                    "Invalid audio URL."
+            });
 
-            status:
-                job.status,
+        }
 
-            progress:
-                Math.round(
-                    job.progress || 0
-                ),
+
+        const jobId =
+            crypto.randomUUID();
+
+
+        const outputFile =
+            path.join(
+                TEMP_DIR,
+                `${jobId}.mp3`
+            );
+
+
+        const safeTitle =
+            cleanFilename(
+                title || "audio"
+            );
+
+
+        jobs.set(jobId, {
+
+            id: jobId,
+
+            type: "mp3",
+
+            status: "processing",
+
+            progress: 0,
 
             stage:
-                job.stage,
+                "MP3 conversion start ho rahi hai...",
 
-            error:
-                job.error
+            outputFile,
 
-        });
+            title: safeTitle,
 
-    }
-);
+            error: null,
 
-
-/* =========================================================
-   MERGE DOWNLOAD
-========================================================= */
-
-app.get(
-    "/merge-download/:jobId",
-    (req, res) => {
-
-        const job =
-            jobs.get(
-                req.params.jobId
-            );
-
-
-        if (!job) {
-
-            return res.status(404).send(
-                "Merge job nahi mila."
-            );
-
-        }
-
-
-        if (
-            job.status !==
-            "completed"
-        ) {
-
-            return res.status(409).send(
-                "Video abhi ready nahi hai."
-            );
-
-        }
-
-
-        if (
-            !fs.existsSync(
-                job.outputFile
-            )
-        ) {
-
-            return res.status(404).send(
-                "Processed video file nahi mili."
-            );
-
-        }
-
-
-        res.download(
-
-            job.outputFile,
-
-            `${job.title}.mp4`,
-
-            error => {
-
-                if (error) {
-
-                    console.error(
-                        "Download error:",
-                        error
-                    );
-
-                }
-
-
-                cleanupJob(
-                    job.id
-                );
-
-            }
-
-        );
-
-    }
-);
-
-
-/* =========================================================
-   MP3
-========================================================= */
-
-app.get("/mp3", (req, res) => {
-
-    const audioUrl =
-        String(req.query.audioUrl || "").trim();
-
-    const title =
-        String(req.query.title || "audio").trim();
-
-
-    if (!audioUrl) {
-
-        return res.status(400).json({
-
-            error:
-                "audioUrl required hai."
+            createdAt: Date.now()
 
         });
 
-    }
 
-
-    if (!isHttpUrl(audioUrl)) {
-
-        return res.status(400).json({
-
-            error:
-                "Invalid audio URL."
-
-        });
-
-    }
-
-
-    const jobId =
-        crypto.randomUUID();
-
-
-    const outputFile =
-        path.join(
-            TEMP_DIR,
-            `${jobId}.mp3`
+        console.log(
+            `MP3 job started: ${jobId}`
         );
 
 
-    jobs.set(jobId, {
-
-        id:
+        runMp3Job(
             jobId,
-
-        status:
-            "processing",
-
-        progress:
-            0,
-
-        stage:
-            "MP3 conversion start ho rahi hai...",
-
-        outputFile,
-
-        title:
-            cleanFilename(title),
-
-        error:
-            null,
-
-        createdAt:
-            Date.now()
-
-    });
+            audioUrl,
+            outputFile
+        );
 
 
-    console.log(
-        `Starting MP3 job: ${jobId}`
-    );
+        res.json({
+
+            success: true,
+
+            jobId
+
+        });
 
 
-    runMp3Job(
-        jobId,
-        audioUrl,
-        outputFile
-    );
+    } catch (error) {
+
+        console.error(
+            "MP3 creation error:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            error:
+                "MP3 job create nahi hui."
+
+        });
+
+    }
+
+});
+
+
+/*
+=========================================================
+JOB STATUS
+=========================================================
+*/
+
+app.get("/merge-status/:jobId", (req, res) => {
+
+    const job =
+        jobs.get(
+            req.params.jobId
+        );
+
+
+    if (!job) {
+
+        return res.status(404).json({
+
+            error:
+                "Job nahi mili."
+
+        });
+
+    }
 
 
     res.json({
 
-        success:
-            true,
+        success: true,
 
-        jobId
+        jobId: job.id,
+
+        type: job.type,
+
+        status: job.status,
+
+        progress:
+            Math.round(
+                job.progress || 0
+            ),
+
+        stage:
+            job.stage,
+
+        error:
+            job.error
 
     });
 
 });
 
 
-/* =========================================================
-   MP3 DOWNLOAD
-========================================================= */
+/*
+=========================================================
+VIDEO DOWNLOAD
+=========================================================
+*/
 
-app.get(
-    "/mp3-download/:jobId",
-    (req, res) => {
+app.get("/merge-download/:jobId", (req, res) => {
 
-        const job =
-            jobs.get(
-                req.params.jobId
-            );
-
-
-        if (!job) {
-
-            return res.status(404).send(
-                "MP3 job nahi mila."
-            );
-
-        }
+    const job =
+        jobs.get(
+            req.params.jobId
+        );
 
 
-        if (
-            job.status !==
-            "completed"
-        ) {
+    if (!job) {
 
-            return res.status(409).send(
-                "MP3 abhi ready nahi hai."
-            );
+        return res.status(404).send(
+            "Merge job nahi mila."
+        );
 
-        }
+    }
 
 
-        if (
-            !fs.existsSync(
-                job.outputFile
-            )
-        ) {
+    if (job.type !== "merge") {
 
-            return res.status(404).send(
-                "MP3 file nahi mili."
-            );
+        return res.status(400).send(
+            "Invalid job type."
+        );
 
-        }
+    }
 
 
-        res.download(
+    if (job.status !== "completed") {
 
-            job.outputFile,
+        return res.status(409).send(
+            "Video abhi ready nahi hai."
+        );
 
-            `${job.title}.mp3`,
-
-            error => {
-
-                if (error) {
-
-                    console.error(
-                        "MP3 download error:",
-                        error
-                    );
-
-                }
+    }
 
 
-                cleanupJob(
-                    job.id
+    if (
+        !job.outputFile ||
+        !fs.existsSync(job.outputFile)
+    ) {
+
+        return res.status(404).send(
+            "Processed video file nahi mili."
+        );
+
+    }
+
+
+    const filename =
+        `${job.title || "video"}.mp4`;
+
+
+    res.download(
+        job.outputFile,
+        filename,
+        error => {
+
+            if (error) {
+
+                console.error(
+                    "Video download error:",
+                    error
                 );
 
             }
 
+
+            cleanupJob(job.id);
+
+        }
+    );
+
+});
+
+
+/*
+=========================================================
+MP3 DOWNLOAD
+=========================================================
+*/
+
+app.get("/mp3-download/:jobId", (req, res) => {
+
+    const job =
+        jobs.get(
+            req.params.jobId
+        );
+
+
+    if (!job) {
+
+        return res.status(404).send(
+            "MP3 job nahi mila."
         );
 
     }
-);
 
 
-/* =========================================================
-   FFmpeg HTTP OPTIONS
-========================================================= */
+    if (job.type !== "mp3") {
 
-function mediaInputOptions() {
+        return res.status(400).send(
+            "Invalid job type."
+        );
 
-    return [
-
-        "-user_agent",
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-
-        "-headers",
-        "Referer: https://www.youtube.com/\r\nOrigin: https://www.youtube.com\r\n",
-
-        "-reconnect",
-        "1",
-
-        "-reconnect_streamed",
-        "1",
-
-        "-reconnect_at_eof",
-        "1",
-
-        "-reconnect_delay_max",
-        "10",
-
-        "-rw_timeout",
-        "30000000"
-
-    ];
-
-}
+    }
 
 
-/* =========================================================
-   RUN MERGE JOB
-========================================================= */
+    if (job.status !== "completed") {
+
+        return res.status(409).send(
+            "MP3 abhi ready nahi hai."
+        );
+
+    }
+
+
+    if (
+        !job.outputFile ||
+        !fs.existsSync(job.outputFile)
+    ) {
+
+        return res.status(404).send(
+            "MP3 file nahi mili."
+        );
+
+    }
+
+
+    const filename =
+        `${job.title || "audio"}.mp3`;
+
+
+    res.download(
+        job.outputFile,
+        filename,
+        error => {
+
+            if (error) {
+
+                console.error(
+                    "MP3 download error:",
+                    error
+                );
+
+            }
+
+
+            cleanupJob(job.id);
+
+        }
+    );
+
+});
+
+
+/*
+=========================================================
+MERGE PROCESS
+=========================================================
+*/
 
 function runMergeJob(
     jobId,
@@ -744,29 +536,26 @@ function runMergeJob(
     }
 
 
-    /*
-     * IMPORTANT:
-     *
-     * FFmpeg ko dono signed URLs ke saath
-     * proper HTTP headers diye ja rahe hain.
-     */
-
     const command =
         ffmpeg();
 
 
     command
         .input(videoUrl)
-        .inputOptions(
-            mediaInputOptions()
-        );
+        .inputOptions([
+            "-reconnect 1",
+            "-reconnect_streamed 1",
+            "-reconnect_delay_max 5"
+        ]);
 
 
     command
         .input(audioUrl)
-        .inputOptions(
-            mediaInputOptions()
-        );
+        .inputOptions([
+            "-reconnect 1",
+            "-reconnect_streamed 1",
+            "-reconnect_delay_max 5"
+        ]);
 
 
     command
@@ -776,39 +565,19 @@ function runMergeJob(
 
             "-map 1:a:0",
 
-            /*
-             * Video re-encode
-             */
-
             "-c:v libx264",
 
             "-preset veryfast",
 
             "-crf 23",
 
-            /*
-             * Audio
-             */
-
             "-c:a aac",
 
             "-b:a 192k",
 
-            /*
-             * Compatibility
-             */
-
             "-pix_fmt yuv420p",
 
-            /*
-             * Stop when shortest stream ends
-             */
-
             "-shortest",
-
-            /*
-             * MP4 streaming optimization
-             */
 
             "-movflags +faststart"
 
@@ -817,159 +586,140 @@ function runMergeJob(
         .format("mp4")
 
 
-        .on(
-            "start",
-            commandLine => {
+        .on("start", commandLine => {
 
-                console.log(
-                    `FFmpeg started ${jobId}`
-                );
+            console.log(
+                `FFmpeg merge started: ${jobId}`
+            );
 
-                console.log(
-                    commandLine
-                );
+            console.log(
+                commandLine
+            );
 
+        })
+
+
+        .on("progress", progress => {
+
+            const currentJob =
+                jobs.get(jobId);
+
+
+            if (!currentJob) {
+                return;
             }
-        )
 
 
-        .on(
-            "progress",
-            progress => {
+            if (
+                typeof progress.percent ===
+                "number"
+            ) {
 
-                const currentJob =
-                    jobs.get(jobId);
-
-
-                if (!currentJob) {
-                    return;
-                }
-
-
-                if (
-                    typeof progress.percent ===
-                    "number"
-                ) {
-
-                    currentJob.progress =
-                        Math.min(
-                            99,
+                currentJob.progress =
+                    Math.min(
+                        99,
+                        Math.max(
+                            0,
                             Math.round(
                                 progress.percent
                             )
-                        );
-
-                }
-
-
-                currentJob.stage =
-                    "Video + Audio merge ho raha hai...";
-
-            }
-        )
-
-
-        .on(
-            "stderr",
-            line => {
-
-                /*
-                 * Render logs mein FFmpeg ka
-                 * useful error output dikhega.
-                 */
-
-                if (
-                    line &&
-                    (
-                        line.includes("403") ||
-                        line.includes("401") ||
-                        line.includes("Error") ||
-                        line.includes("HTTP")
-                    )
-                ) {
-
-                    console.error(
-                        `FFmpeg ${jobId}:`,
-                        line
+                        )
                     );
 
-                }
-
             }
-        )
 
 
-        .on(
-            "error",
-            error => {
+            currentJob.stage =
+                "Video + Audio merge ho raha hai...";
 
-                console.error(
-                    `FFmpeg error ${jobId}:`,
+        })
+
+
+        .on("error", error => {
+
+            console.error(
+                `FFmpeg merge error ${jobId}:`,
+                error
+            );
+
+
+            const currentJob =
+                jobs.get(jobId);
+
+
+            if (!currentJob) {
+                return;
+            }
+
+
+            currentJob.status =
+                "error";
+
+
+            currentJob.progress =
+                0;
+
+
+            currentJob.stage =
+                "Processing failed.";
+
+
+            currentJob.error =
+                getSafeFfmpegError(
                     error
                 );
 
-
-                const currentJob =
-                    jobs.get(jobId);
+        })
 
 
-                if (!currentJob) {
-                    return;
-                }
+        .on("end", () => {
 
+            console.log(
+                `Merge completed: ${jobId}`
+            );
+
+
+            const currentJob =
+                jobs.get(jobId);
+
+
+            if (!currentJob) {
+                return;
+            }
+
+
+            if (
+                !fs.existsSync(
+                    outputFile
+                )
+            ) {
 
                 currentJob.status =
                     "error";
 
-
-                currentJob.progress =
-                    0;
-
-
                 currentJob.stage =
-                    "Processing failed.";
-
+                    "Output file missing.";
 
                 currentJob.error =
-                    normalizeFfmpegError(
-                        error
-                    );
+                    "FFmpeg completed but output file was not created.";
+
+                return;
 
             }
-        )
 
 
-        .on(
-            "end",
-            () => {
-
-                console.log(
-                    `Merge completed: ${jobId}`
-                );
+            currentJob.status =
+                "completed";
 
 
-                const currentJob =
-                    jobs.get(jobId);
+            currentJob.progress =
+                100;
 
 
-                if (!currentJob) {
-                    return;
-                }
+            currentJob.stage =
+                "Video ready hai.";
 
-
-                currentJob.status =
-                    "completed";
-
-
-                currentJob.progress =
-                    100;
-
-
-                currentJob.stage =
-                    "Video ready hai.";
-
-            }
-        )
+        })
 
 
         .save(outputFile);
@@ -977,9 +727,11 @@ function runMergeJob(
 }
 
 
-/* =========================================================
-   RUN MP3 JOB
-========================================================= */
+/*
+=========================================================
+MP3 PROCESS
+=========================================================
+*/
 
 function runMp3Job(
     jobId,
@@ -1000,9 +752,11 @@ function runMp3Job(
 
         .input(audioUrl)
 
-        .inputOptions(
-            mediaInputOptions()
-        )
+        .inputOptions([
+            "-reconnect 1",
+            "-reconnect_streamed 1",
+            "-reconnect_delay_max 5"
+        ])
 
         .outputOptions([
 
@@ -1010,163 +764,147 @@ function runMp3Job(
 
             "-c:a libmp3lame",
 
-            "-b:a 192k",
-
-            "-ar 44100"
+            "-b:a 192k"
 
         ])
 
         .format("mp3")
 
 
-        .on(
-            "start",
-            commandLine => {
+        .on("start", commandLine => {
 
-                console.log(
-                    `MP3 FFmpeg started: ${jobId}`
-                );
+            console.log(
+                `FFmpeg MP3 started: ${jobId}`
+            );
 
-                console.log(
-                    commandLine
-                );
+            console.log(
+                commandLine
+            );
 
+        })
+
+
+        .on("progress", progress => {
+
+            const currentJob =
+                jobs.get(jobId);
+
+
+            if (!currentJob) {
+                return;
             }
-        )
 
 
-        .on(
-            "progress",
-            progress => {
+            if (
+                typeof progress.percent ===
+                "number"
+            ) {
 
-                const currentJob =
-                    jobs.get(jobId);
-
-
-                if (!currentJob) {
-                    return;
-                }
-
-
-                if (
-                    typeof progress.percent ===
-                    "number"
-                ) {
-
-                    currentJob.progress =
-                        Math.min(
-                            99,
+                currentJob.progress =
+                    Math.min(
+                        99,
+                        Math.max(
+                            0,
                             Math.round(
                                 progress.percent
                             )
-                        );
-
-                }
-
-
-                currentJob.stage =
-                    "MP3 conversion ho rahi hai...";
-
-            }
-        )
-
-
-        .on(
-            "stderr",
-            line => {
-
-                if (
-                    line &&
-                    (
-                        line.includes("403") ||
-                        line.includes("401") ||
-                        line.includes("Error") ||
-                        line.includes("HTTP")
-                    )
-                ) {
-
-                    console.error(
-                        `MP3 FFmpeg ${jobId}:`,
-                        line
+                        )
                     );
 
-                }
-
             }
-        )
 
 
-        .on(
-            "error",
-            error => {
+            currentJob.stage =
+                "MP3 conversion ho rahi hai...";
 
-                console.error(
-                    `MP3 FFmpeg error ${jobId}:`,
+        })
+
+
+        .on("error", error => {
+
+            console.error(
+                `FFmpeg MP3 error ${jobId}:`,
+                error
+            );
+
+
+            const currentJob =
+                jobs.get(jobId);
+
+
+            if (!currentJob) {
+                return;
+            }
+
+
+            currentJob.status =
+                "error";
+
+
+            currentJob.progress =
+                0;
+
+
+            currentJob.stage =
+                "MP3 conversion failed.";
+
+
+            currentJob.error =
+                getSafeFfmpegError(
                     error
                 );
 
-
-                const currentJob =
-                    jobs.get(jobId);
+        })
 
 
-                if (!currentJob) {
-                    return;
-                }
+        .on("end", () => {
 
+            console.log(
+                `MP3 completed: ${jobId}`
+            );
+
+
+            const currentJob =
+                jobs.get(jobId);
+
+
+            if (!currentJob) {
+                return;
+            }
+
+
+            if (
+                !fs.existsSync(
+                    outputFile
+                )
+            ) {
 
                 currentJob.status =
                     "error";
 
-
-                currentJob.progress =
-                    0;
-
-
                 currentJob.stage =
-                    "MP3 conversion failed.";
-
+                    "Output file missing.";
 
                 currentJob.error =
-                    normalizeFfmpegError(
-                        error
-                    );
+                    "FFmpeg completed but output file was not created.";
+
+                return;
 
             }
-        )
 
 
-        .on(
-            "end",
-            () => {
-
-                console.log(
-                    `MP3 completed: ${jobId}`
-                );
+            currentJob.status =
+                "completed";
 
 
-                const currentJob =
-                    jobs.get(jobId);
+            currentJob.progress =
+                100;
 
 
-                if (!currentJob) {
-                    return;
-                }
+            currentJob.stage =
+                "MP3 ready hai.";
 
-
-                currentJob.status =
-                    "completed";
-
-
-                currentJob.progress =
-                    100;
-
-
-                currentJob.stage =
-                    "MP3 ready hai.";
-
-            }
-        )
+        })
 
 
         .save(outputFile);
@@ -1174,183 +912,21 @@ function runMp3Job(
 }
 
 
-/* =========================================================
-   OPTIONAL MEDIA PROXY
-========================================================= */
-
 /*
- * Ye endpoint useful hai agar frontend ko
- * kisi returned media URL ko backend ke through
- * stream karna ho.
- *
- * NOTE:
- * Signed Googlevideo URLs IP/session-bound ho sakte hain.
- * Isliye ye endpoint 403 ko magically bypass nahi karta.
- */
-
-app.get("/media-proxy", async (req, res) => {
-
-    try {
-
-        const mediaUrl =
-            String(
-                req.query.url || ""
-            ).trim();
-
-
-        if (!mediaUrl) {
-
-            return res.status(400).send(
-                "url required hai."
-            );
-
-        }
-
-
-        if (!isHttpUrl(mediaUrl)) {
-
-            return res.status(400).send(
-                "Invalid URL."
-            );
-
-        }
-
-
-        const response =
-            await fetch(
-                mediaUrl,
-                {
-
-                    method:
-                        "GET",
-
-                    headers: {
-
-                        "User-Agent":
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
-
-                        "Referer":
-                            "https://www.youtube.com/",
-
-                        "Origin":
-                            "https://www.youtube.com"
-
-                    }
-
-                }
-            );
-
-
-        if (!response.ok) {
-
-            return res.status(
-                response.status
-            ).send(
-                `Media server returned HTTP ${response.status}`
-            );
-
-        }
-
-
-        const contentType =
-            response.headers.get(
-                "content-type"
-            );
-
-
-        if (contentType) {
-
-            res.setHeader(
-                "Content-Type",
-                contentType
-            );
-
-        }
-
-
-        const contentLength =
-            response.headers.get(
-                "content-length"
-            );
-
-
-        if (contentLength) {
-
-            res.setHeader(
-                "Content-Length",
-                contentLength
-            );
-
-        }
-
-
-        res.setHeader(
-            "Access-Control-Allow-Origin",
-            "*"
-        );
-
-
-        if (
-            response.body &&
-            response.body.pipeTo
-        ) {
-
-            const nodeStream =
-                require("stream")
-                    .Readable
-                    .fromWeb(
-                        response.body
-                    );
-
-
-            nodeStream.pipe(res);
-
-
-        } else {
-
-            const buffer =
-                Buffer.from(
-                    await response.arrayBuffer()
-                );
-
-
-            res.end(buffer);
-
-        }
-
-
-    } catch (error) {
-
-        console.error(
-            "Media proxy error:",
-            error
-        );
-
-
-        if (!res.headersSent) {
-
-            res.status(500).send(
-                "Media proxy failed: " +
-                error.message
-            );
-
-        }
-
-    }
-
-});
-
-
-/* =========================================================
-   HELPERS
-========================================================= */
+=========================================================
+URL VALIDATION
+=========================================================
+*/
 
 function isHttpUrl(value) {
 
     try {
 
         const url =
-            new URL(value);
+            new URL(
+                String(value)
+            );
+
 
         return (
             url.protocol === "http:" ||
@@ -1365,6 +941,12 @@ function isHttpUrl(value) {
 
 }
 
+
+/*
+=========================================================
+FILENAME CLEANER
+=========================================================
+*/
 
 function cleanFilename(name) {
 
@@ -1385,20 +967,31 @@ function cleanFilename(name) {
             "_"
         )
 
+        .replace(
+            /^\.+/,
+            ""
+        )
+
         .substring(
             0,
             150
-        );
+        )
+
+        || "download";
 
 }
 
 
-function normalizeFfmpegError(error) {
+/*
+=========================================================
+FFMPEG ERROR CLEANER
+=========================================================
+*/
+
+function getSafeFfmpegError(error) {
 
     if (!error) {
-
-        return "Unknown FFmpeg error.";
-
+        return "FFmpeg processing failed.";
     }
 
 
@@ -1410,35 +1003,58 @@ function normalizeFfmpegError(error) {
 
 
     if (
-        message.includes("403") ||
-        message.includes("Forbidden")
+        message.includes(
+            "403 Forbidden"
+        )
     ) {
 
         return (
-            "Media server ne 403 Forbidden diya. " +
-            "RapidAPI ka temporary Googlevideo URL " +
-            "Render server se accessible nahi hai."
+            "Source media server ne access deny kiya. " +
+            "Authorized direct media URL use karein."
         );
 
     }
 
 
     if (
-        message.includes("401")
+        message.includes(
+            "404 Not Found"
+        )
     ) {
 
         return (
-            "Media URL unauthorized (401). " +
-            "Temporary media URL expire ho sakta hai."
+            "Source media file nahi mili."
         );
 
     }
 
 
-    return message;
+    if (
+        message.includes(
+            "Invalid data found"
+        )
+    ) {
+
+        return (
+            "Source media format valid nahi hai."
+        );
+
+    }
+
+
+    return message.substring(
+        0,
+        1000
+    );
 
 }
 
+
+/*
+=========================================================
+JOB CLEANUP
+=========================================================
+*/
 
 function cleanupJob(jobId) {
 
@@ -1469,7 +1085,7 @@ function cleanupJob(jobId) {
     } catch (error) {
 
         console.error(
-            "Temp file cleanup error:",
+            "File cleanup error:",
             error
         );
 
@@ -1481,42 +1097,85 @@ function cleanupJob(jobId) {
 }
 
 
-/* =========================================================
-   CLEAN OLD JOBS
-========================================================= */
+/*
+=========================================================
+AUTOMATIC OLD JOB CLEANUP
+=========================================================
+*/
 
-setInterval(
-    () => {
+setInterval(() => {
 
-        const now =
-            Date.now();
+    const now =
+        Date.now();
 
 
-        for (
-            const [id, job]
-            of jobs.entries()
+    for (
+        const [id, job]
+        of jobs.entries()
+    ) {
+
+        const age =
+            now - job.createdAt;
+
+
+        /*
+         * 30 minutes
+         */
+
+        if (
+            age >
+            30 * 60 * 1000
         ) {
 
-            if (
-                now -
-                job.createdAt >
-                30 * 60 * 1000
-            ) {
-
-                cleanupJob(id);
-
-            }
+            cleanupJob(id);
 
         }
 
-    },
-    5 * 60 * 1000
+    }
+
+}, 5 * 60 * 1000);
+
+
+/*
+=========================================================
+GLOBAL ERROR HANDLER
+=========================================================
+*/
+
+app.use(
+    (error, req, res, next) => {
+
+        console.error(
+            "Unhandled server error:",
+            error
+        );
+
+
+        if (
+            res.headersSent
+        ) {
+
+            return next(error);
+
+        }
+
+
+        res.status(500).json({
+
+            error:
+                "Internal server error."
+
+        });
+
+    }
 );
 
 
-/* =========================================================
-   SERVER
-========================================================= */
+/*
+=========================================================
+SERVER
+=========================================================
+*/
 
 app.listen(
     PORT,
@@ -1524,7 +1183,7 @@ app.listen(
     () => {
 
         console.log(
-            `VidsSave server running on port ${PORT}`
+            `VidsSave Media API running on port ${PORT}`
         );
 
     }
