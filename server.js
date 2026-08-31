@@ -16,39 +16,47 @@ const PORT = process.env.PORT || 3000;
 const TEMP_DIR = "/tmp/vidssave";
 const UPLOAD_DIR = path.join(TEMP_DIR, "uploads");
 
+const MAX_FILE_SIZE = 500 * 1024 * 1024;
+
 if (!fs.existsSync(TEMP_DIR)) {
-    fs.mkdirSync(TEMP_DIR, {
-        recursive: true
-    });
+    fs.mkdirSync(TEMP_DIR, { recursive: true });
 }
 
 if (!fs.existsSync(UPLOAD_DIR)) {
-    fs.mkdirSync(UPLOAD_DIR, {
-        recursive: true
-    });
+    fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 }
 
 const jobs = new Map();
+const mediaFiles = new Map();
 
-const MAX_FILE_SIZE = 500 * 1024 * 1024;
+
+/*
+=========================================================
+MULTER
+=========================================================
+*/
 
 const upload = multer({
+
     storage: multer.diskStorage({
+
         destination: (req, file, cb) => {
             cb(null, UPLOAD_DIR);
         },
 
         filename: (req, file, cb) => {
 
-            const extension =
+            const ext =
                 path.extname(file.originalname)
                     .toLowerCase();
 
-            const filename =
-                `${crypto.randomUUID()}${extension}`;
+            cb(
+                null,
+                `${crypto.randomUUID()}${ext}`
+            );
 
-            cb(null, filename);
         }
+
     }),
 
     limits: {
@@ -71,11 +79,11 @@ const upload = multer({
             ".flac"
         ];
 
-        const extension =
+        const ext =
             path.extname(file.originalname)
                 .toLowerCase();
 
-        if (!allowed.includes(extension)) {
+        if (!allowed.includes(ext)) {
 
             return cb(
                 new Error(
@@ -86,7 +94,9 @@ const upload = multer({
         }
 
         cb(null, true);
+
     }
+
 });
 
 
@@ -99,11 +109,22 @@ ROOT
 app.get("/", (req, res) => {
 
     res.json({
-        service: "VidsSave Media Processing API",
-        status: "running",
-        version: "6.1.0",
-        rapidAPI: false,
-        upload: true
+
+        service:
+            "VidsSave Media Processing API",
+
+        status:
+            "running",
+
+        version:
+            "7.0.0",
+
+        rapidAPI:
+            false,
+
+        upload:
+            true
+
     });
 
 });
@@ -118,16 +139,27 @@ HEALTH
 app.get("/health", (req, res) => {
 
     res.json({
-        status: "ok",
-        ffmpeg: true,
-        rapidAPI: false,
-        upload: true,
+
+        status:
+            "ok",
+
+        ffmpeg:
+            true,
+
+        rapidAPI:
+            false,
+
+        upload:
+            true,
+
         maxUploadMB:
             MAX_FILE_SIZE / 1024 / 1024,
+
         uptime:
             Math.floor(
                 process.uptime()
             )
+
     });
 
 });
@@ -135,7 +167,7 @@ app.get("/health", (req, res) => {
 
 /*
 =========================================================
-UPLOAD MEDIA
+UPLOAD
 =========================================================
 */
 
@@ -149,15 +181,17 @@ app.post(
             if (!req.file) {
 
                 return res.status(400).json({
+
                     error:
                         "Media file select nahi ki gayi."
+
                 });
 
             }
 
 
-            const filePath =
-                req.file.path;
+            const mediaId =
+                crypto.randomUUID();
 
 
             const originalName =
@@ -182,58 +216,42 @@ app.post(
                 );
 
 
-            const mediaId =
-                crypto.randomUUID();
+            mediaFiles.set(
+                mediaId,
+                {
+
+                    id:
+                        mediaId,
+
+                    inputFile:
+                        req.file.path,
+
+                    originalName,
+
+                    type:
+                        isAudio
+                            ? "audio"
+                            : "video",
+
+                    size:
+                        req.file.size,
+
+                    createdAt:
+                        Date.now()
+
+                }
+            );
 
 
-            const job =
-                jobs.set(
-                    mediaId,
-                    {
-                        id: mediaId,
-
-                        type:
-                            isAudio
-                                ? "audio"
-                                : "video",
-
-                        status:
-                            "uploaded",
-
-                        progress: 0,
-
-                        stage:
-                            "File upload complete.",
-
-                        inputFile:
-                            filePath,
-
-                        outputFile:
-                            null,
-
-                        title:
-                            cleanFilename(
-                                path.basename(
-                                    originalName,
-                                    extension
-                                )
-                            ),
-
-                        error:
-                            null,
-
-                        createdAt:
-                            Date.now(),
-
-                        finishedAt:
-                            null
-                    }
-                );
+            console.log(
+                `Upload complete: ${mediaId}`
+            );
 
 
             return res.status(201).json({
 
-                success: true,
+                success:
+                    true,
 
                 mediaId,
 
@@ -241,7 +259,9 @@ app.post(
                     originalName,
 
                 type:
-                    job.type,
+                    isAudio
+                        ? "audio"
+                        : "video",
 
                 size:
                     req.file.size
@@ -258,17 +278,18 @@ app.post(
 
 
             if (
-                req.file &&
-                req.file.path &&
+                req.file?.path &&
                 fs.existsSync(
                     req.file.path
                 )
             ) {
 
                 try {
+
                     fs.unlinkSync(
                         req.file.path
                     );
+
                 } catch {}
 
             }
@@ -277,7 +298,7 @@ app.post(
             return res.status(500).json({
 
                 error:
-                    "File upload failed.",
+                    "Upload failed.",
 
                 details:
                     safeError(error)
@@ -292,20 +313,21 @@ app.post(
 
 /*
 =========================================================
-PROCESS UPLOADED MEDIA
+PROCESS UPLOADED FILE
 =========================================================
 */
 
 app.post(
     "/media/process-upload",
-    async (req, res) => {
+    (req, res) => {
 
         try {
 
             const {
                 mediaId,
                 output
-            } = req.body || {};
+            } =
+                req.body || {};
 
 
             if (!mediaId) {
@@ -320,13 +342,13 @@ app.post(
             }
 
 
-            const job =
-                jobs.get(
+            const media =
+                mediaFiles.get(
                     mediaId
                 );
 
 
-            if (!job) {
+            if (!media) {
 
                 return res.status(404).json({
 
@@ -339,13 +361,20 @@ app.post(
 
 
             if (
-                job.status !== "uploaded"
+                !fs.existsSync(
+                    media.inputFile
+                )
             ) {
 
-                return res.status(409).json({
+                mediaFiles.delete(
+                    mediaId
+                );
+
+
+                return res.status(404).json({
 
                     error:
-                        "Ye media already process ho chuki hai ya processing mein hai."
+                        "Uploaded file server par nahi mili."
 
                 });
 
@@ -373,12 +402,8 @@ app.post(
             }
 
 
-            /*
-             * Audio input + MP4 output is not useful.
-             */
-
             if (
-                job.type === "audio" &&
+                media.type === "audio" &&
                 requestedOutput === "mp4"
             ) {
 
@@ -392,7 +417,17 @@ app.post(
             }
 
 
-            const outputExtension =
+            /*
+            =============================================
+            NEW JOB ID
+            =============================================
+            */
+
+            const jobId =
+                crypto.randomUUID();
+
+
+            const extension =
                 requestedOutput === "mp3"
                     ? ".mp3"
                     : ".mp4";
@@ -401,40 +436,99 @@ app.post(
             const outputFile =
                 path.join(
                     TEMP_DIR,
-                    `${mediaId}${outputExtension}`
+                    `${jobId}${extension}`
                 );
 
 
-            job.status =
-                "processing";
+            const safeTitle =
+                cleanFilename(
+                    path.basename(
+                        media.originalName,
+                        path.extname(
+                            media.originalName
+                        )
+                    )
+                );
 
 
-            job.progress =
-                0;
+            const job = {
 
+                id:
+                    jobId,
 
-            job.stage =
-                requestedOutput === "mp3"
-                    ? "MP3 conversion start ho rahi hai..."
-                    : "MP4 conversion start ho rahi hai...";
-
-
-            job.outputFile =
-                outputFile;
-
-
-            runUploadedMediaJob(
                 mediaId,
-                requestedOutput
+
+                type:
+                    requestedOutput,
+
+                status:
+                    "processing",
+
+                progress:
+                    0,
+
+                stage:
+                    requestedOutput === "mp3"
+                        ? "MP3 conversion start ho rahi hai..."
+                        : "MP4 conversion start ho rahi hai...",
+
+                inputFile:
+                    media.inputFile,
+
+                outputFile,
+
+                title:
+                    safeTitle,
+
+                error:
+                    null,
+
+                createdAt:
+                    Date.now(),
+
+                finishedAt:
+                    null
+
+            };
+
+
+            jobs.set(
+                jobId,
+                job
             );
 
 
+            console.log(
+                `Processing job created: ${jobId}`
+            );
+
+
+            /*
+            =============================================
+            Start asynchronously
+            =============================================
+            */
+
+            runMediaJob(
+                jobId
+            );
+
+
+            /*
+            =============================================
+            IMPORTANT:
+            Job ID frontend ko return karo.
+            =============================================
+            */
+
             return res.status(202).json({
 
-                success: true,
+                success:
+                    true,
 
-                jobId:
-                    mediaId,
+                jobId,
+
+                mediaId,
 
                 output:
                     requestedOutput
@@ -453,7 +547,7 @@ app.post(
             return res.status(500).json({
 
                 error:
-                    "Media processing start nahi ho saki.",
+                    "Processing start nahi ho saki.",
 
                 details:
                     safeError(error)
@@ -474,158 +568,209 @@ JOB STATUS
 
 app.get(
     "/jobs/:jobId",
-    (req, res) => {
-
-        const job =
-            jobs.get(
-                req.params.jobId
-            );
-
-
-        if (!job) {
-
-            return res.status(404).json({
-
-                error:
-                    "Job nahi mili."
-
-            });
-
-        }
-
-
-        return res.json({
-
-            success: true,
-
-            jobId:
-                job.id,
-
-            type:
-                job.type,
-
-            status:
-                job.status,
-
-            progress:
-                Math.round(
-                    clamp(
-                        Number(
-                            job.progress
-                        ) || 0,
-                        0,
-                        100
-                    )
-                ),
-
-            stage:
-                job.stage,
-
-            error:
-                job.error
-
-        });
-
-    }
+    getJobStatus
 );
 
 
 /*
 =========================================================
-DOWNLOAD RESULT
+BACKWARD-COMPATIBILITY STATUS
+=========================================================
+*/
+
+app.get(
+    "/merge-status/:jobId",
+    getJobStatus
+);
+
+
+function getJobStatus(
+    req,
+    res
+) {
+
+    const job =
+        jobs.get(
+            req.params.jobId
+        );
+
+
+    if (!job) {
+
+        return res.status(404).json({
+
+            error:
+                "Job nahi mili.",
+
+            jobId:
+                req.params.jobId
+
+        });
+
+    }
+
+
+    return res.json({
+
+        success:
+            true,
+
+        jobId:
+            job.id,
+
+        type:
+            job.type,
+
+        status:
+            job.status,
+
+        progress:
+            Math.round(
+                clamp(
+                    Number(
+                        job.progress
+                    ) || 0,
+                    0,
+                    100
+                )
+            ),
+
+        stage:
+            job.stage,
+
+        error:
+            job.error
+
+    });
+
+}
+
+
+/*
+=========================================================
+DOWNLOAD
 =========================================================
 */
 
 app.get(
     "/jobs/:jobId/download",
-    (req, res) => {
-
-        const job =
-            jobs.get(
-                req.params.jobId
-            );
-
-
-        if (!job) {
-
-            return res.status(404).send(
-                "Job nahi mili."
-            );
-
-        }
-
-
-        if (
-            job.status !==
-            "completed"
-        ) {
-
-            return res.status(409).send(
-                "File abhi ready nahi hai."
-            );
-
-        }
-
-
-        if (
-            !job.outputFile ||
-            !fs.existsSync(
-                job.outputFile
-            )
-        ) {
-
-            return res.status(404).send(
-                "Output file nahi mili."
-            );
-
-        }
-
-
-        const extension =
-            path.extname(
-                job.outputFile
-            );
-
-
-        const filename =
-            `${job.title || "VidsSave"}${extension}`;
-
-
-        res.download(
-            job.outputFile,
-            filename,
-            error => {
-
-                if (error) {
-
-                    console.error(
-                        "Download error:",
-                        error
-                    );
-
-                }
-
-
-                cleanupJob(
-                    job.id
-                );
-
-            }
-        );
-
-    }
+    downloadJob
 );
 
 
 /*
 =========================================================
-PROCESS LOCAL UPLOAD
+BACKWARD-COMPATIBILITY VIDEO DOWNLOAD
 =========================================================
 */
 
-function runUploadedMediaJob(
-    jobId,
-    outputType
+app.get(
+    "/merge-download/:jobId",
+    downloadJob
+);
+
+
+/*
+=========================================================
+BACKWARD-COMPATIBILITY MP3 DOWNLOAD
+=========================================================
+*/
+
+app.get(
+    "/mp3-download/:jobId",
+    downloadJob
+);
+
+
+function downloadJob(
+    req,
+    res
+) {
+
+    const job =
+        jobs.get(
+            req.params.jobId
+        );
+
+
+    if (!job) {
+
+        return res.status(404).send(
+            "Job nahi mili."
+        );
+
+    }
+
+
+    if (
+        job.status !==
+        "completed"
+    ) {
+
+        return res.status(409).send(
+            "File abhi ready nahi hai."
+        );
+
+    }
+
+
+    if (
+        !job.outputFile ||
+        !fs.existsSync(
+            job.outputFile
+        )
+    ) {
+
+        return res.status(404).send(
+            "Output file nahi mili."
+        );
+
+    }
+
+
+    const extension =
+        job.type === "mp3"
+            ? ".mp3"
+            : ".mp4";
+
+
+    const filename =
+        `${job.title || "VidsSave"}${extension}`;
+
+
+    res.download(
+        job.outputFile,
+        filename,
+        error => {
+
+            if (error) {
+
+                console.error(
+                    "Download error:",
+                    error
+                );
+
+            }
+
+
+            cleanupJob(
+                job.id
+            );
+
+        }
+    );
+
+}
+
+
+/*
+=========================================================
+MEDIA PROCESS
+=========================================================
+*/
+
+function runMediaJob(
+    jobId
 ) {
 
     const job =
@@ -640,20 +785,15 @@ function runUploadedMediaJob(
 
 
     if (
-        !job.inputFile ||
         !fs.existsSync(
             job.inputFile
         )
     ) {
 
-        job.status =
-            "error";
-
-        job.stage =
-            "Input file nahi mili.";
-
-        job.error =
-            "Uploaded media file missing.";
+        markJobError(
+            jobId,
+            "Input file nahi mili."
+        );
 
         return;
 
@@ -667,7 +807,7 @@ function runUploadedMediaJob(
 
 
     if (
-        outputType ===
+        job.type ===
         "mp3"
     ) {
 
@@ -731,7 +871,7 @@ function runUploadedMediaJob(
         commandLine => {
 
             console.log(
-                `FFmpeg upload job started: ${jobId}`
+                `FFmpeg started: ${jobId}`
             );
 
             console.log(
@@ -775,7 +915,7 @@ function runUploadedMediaJob(
 
 
             currentJob.stage =
-                outputType === "mp3"
+                currentJob.type === "mp3"
                     ? "MP3 conversion ho rahi hai..."
                     : "MP4 conversion ho rahi hai...";
 
@@ -788,62 +928,17 @@ function runUploadedMediaJob(
         error => {
 
             console.error(
-                `FFmpeg upload error ${jobId}:`,
+                `FFmpeg error ${jobId}:`,
                 error
             );
 
 
-            const currentJob =
-                jobs.get(
-                    jobId
-                );
-
-
-            if (!currentJob) {
-                return;
-            }
-
-
-            currentJob.status =
-                "error";
-
-
-            currentJob.progress =
-                0;
-
-
-            currentJob.stage =
-                "Processing failed.";
-
-
-            currentJob.error =
+            markJobError(
+                jobId,
                 formatFfmpegError(
                     error
-                );
-
-
-            try {
-
-                if (
-                    currentJob.outputFile &&
-                    fs.existsSync(
-                        currentJob.outputFile
-                    )
-                ) {
-
-                    fs.unlinkSync(
-                        currentJob.outputFile
-                    );
-
-                }
-
-            } catch (cleanupError) {
-
-                console.error(
-                    cleanupError
-                );
-
-            }
+                )
+            );
 
         }
     );
@@ -852,11 +947,6 @@ function runUploadedMediaJob(
     command.on(
         "end",
         () => {
-
-            console.log(
-                `FFmpeg upload job completed: ${jobId}`
-            );
-
 
             const currentJob =
                 jobs.get(
@@ -870,23 +960,15 @@ function runUploadedMediaJob(
 
 
             if (
-                !currentJob.outputFile ||
                 !fs.existsSync(
                     currentJob.outputFile
                 )
             ) {
 
-                currentJob.status =
-                    "error";
-
-                currentJob.stage =
-                    "Output file missing.";
-
-                currentJob.error =
-                    "FFmpeg completed but output file nahi bani.";
-
-                currentJob.finishedAt =
-                    Date.now();
+                markJobError(
+                    jobId,
+                    "FFmpeg complete hua lekin output file nahi bani."
+                );
 
                 return;
 
@@ -902,13 +984,18 @@ function runUploadedMediaJob(
 
 
             currentJob.stage =
-                outputType === "mp3"
+                currentJob.type === "mp3"
                     ? "MP3 ready hai!"
                     : "MP4 ready hai!";
 
 
             currentJob.finishedAt =
                 Date.now();
+
+
+            console.log(
+                `Job completed: ${jobId}`
+            );
 
         }
     );
@@ -923,9 +1010,283 @@ function runUploadedMediaJob(
 
 /*
 =========================================================
+JOB ERROR
+=========================================================
+*/
+
+function markJobError(
+    jobId,
+    message
+) {
+
+    const job =
+        jobs.get(
+            jobId
+        );
+
+
+    if (!job) {
+        return;
+    }
+
+
+    job.status =
+        "error";
+
+
+    job.progress =
+        0;
+
+
+    job.stage =
+        "Processing failed.";
+
+
+    job.error =
+        String(
+            message ||
+            "Processing failed."
+        ).substring(
+            0,
+            1000
+        );
+
+
+    job.finishedAt =
+        Date.now();
+
+
+    try {
+
+        if (
+            job.outputFile &&
+            fs.existsSync(
+                job.outputFile
+            )
+        ) {
+
+            fs.unlinkSync(
+                job.outputFile
+            );
+
+        }
+
+    } catch (error) {
+
+        console.error(
+            error
+        );
+
+    }
+
+}
+
+
+/*
+=========================================================
+CLEANUP
+=========================================================
+*/
+
+function cleanupJob(
+    jobId
+) {
+
+    const job =
+        jobs.get(
+            jobId
+        );
+
+
+    if (!job) {
+        return;
+    }
+
+
+    const files = [
+
+        job.inputFile,
+
+        job.outputFile
+
+    ];
+
+
+    for (
+        const file
+        of files
+    ) {
+
+        if (!file) {
+            continue;
+        }
+
+
+        try {
+
+            if (
+                fs.existsSync(
+                    file
+                )
+            ) {
+
+                fs.unlinkSync(
+                    file
+                );
+
+            }
+
+        } catch (error) {
+
+            console.error(
+                "Cleanup error:",
+                error
+            );
+
+        }
+
+    }
+
+
+    jobs.delete(
+        jobId
+    );
+
+
+    if (job.mediaId) {
+
+        mediaFiles.delete(
+            job.mediaId
+        );
+
+    }
+
+}
+
+
+/*
+=========================================================
+OLD UPLOAD CLEANUP
+=========================================================
+*/
+
+setInterval(
+    () => {
+
+        const now =
+            Date.now();
+
+
+        /*
+        =============================================
+        Uploaded files which were never processed
+        =============================================
+        */
+
+        for (
+            const [mediaId, media]
+            of mediaFiles.entries()
+        ) {
+
+            if (
+                now -
+                media.createdAt >
+                30 * 60 * 1000
+            ) {
+
+                try {
+
+                    if (
+                        fs.existsSync(
+                            media.inputFile
+                        )
+                    ) {
+
+                        fs.unlinkSync(
+                            media.inputFile
+                        );
+
+                    }
+
+                } catch (error) {
+
+                    console.error(
+                        error
+                    );
+
+                }
+
+
+                mediaFiles.delete(
+                    mediaId
+                );
+
+            }
+
+        }
+
+
+        /*
+        =============================================
+        Old jobs
+        =============================================
+        */
+
+        for (
+            const [jobId, job]
+            of jobs.entries()
+        ) {
+
+            if (
+                now -
+                job.createdAt >
+                30 * 60 * 1000
+            ) {
+
+                cleanupJob(
+                    jobId
+                );
+
+            }
+
+        }
+
+    },
+    5 * 60 * 1000
+);
+
+
+/*
+=========================================================
 HELPERS
 =========================================================
 */
+
+function isHttpUrl(
+    value
+) {
+
+    try {
+
+        const url =
+            new URL(
+                String(value)
+            );
+
+
+        return (
+            url.protocol === "http:" ||
+            url.protocol === "https:"
+        );
+
+    } catch {
+
+        return false;
+
+    }
+
+}
+
 
 function cleanFilename(
     value
@@ -961,32 +1322,6 @@ function cleanFilename(
         )
 
         || "VidsSave";
-
-}
-
-
-function isHttpUrl(
-    value
-) {
-
-    try {
-
-        const url =
-            new URL(
-                String(value)
-            );
-
-
-        return (
-            url.protocol === "http:" ||
-            url.protocol === "https:"
-        );
-
-    } catch {
-
-        return false;
-
-    }
 
 }
 
@@ -1065,123 +1400,20 @@ function formatFfmpegError(
 }
 
 
-function cleanupJob(
-    jobId
-) {
-
-    const job =
-        jobs.get(
-            jobId
-        );
-
-
-    if (!job) {
-        return;
-    }
-
-
-    const files = [
-
-        job.inputFile,
-
-        job.outputFile
-
-    ];
-
-
-    for (
-        const file
-        of files
-    ) {
-
-        if (!file) {
-            continue;
-        }
-
-
-        try {
-
-            if (
-                fs.existsSync(
-                    file
-                )
-            ) {
-
-                fs.unlinkSync(
-                    file
-                );
-
-            }
-
-        } catch (error) {
-
-            console.error(
-                "Cleanup error:",
-                error
-            );
-
-        }
-
-    }
-
-
-    jobs.delete(
-        jobId
-    );
-
-}
-
-
 /*
 =========================================================
-OLD JOB CLEANUP
-=========================================================
-*/
-
-setInterval(
-    () => {
-
-        const now =
-            Date.now();
-
-
-        for (
-            const [id, job]
-            of jobs.entries()
-        ) {
-
-            if (
-                now -
-                job.createdAt >
-                30 * 60 * 1000
-            ) {
-
-                cleanupJob(
-                    id
-                );
-
-            }
-
-        }
-
-    },
-    5 * 60 * 1000
-);
-
-
-/*
-=========================================================
-MULTER ERROR HANDLER
+GLOBAL ERROR HANDLER
 =========================================================
 */
 
 app.use(
-    (
-        error,
-        req,
-        res,
-        next
-    ) => {
+    (error, req, res, next) => {
+
+        console.error(
+            "Global error:",
+            error
+        );
+
 
         if (
             error instanceof multer.MulterError
@@ -1195,50 +1427,34 @@ app.use(
                 return res.status(413).json({
 
                     error:
-                        "File bahut badi hai.",
+                        "File 500 MB se badi hai.",
 
                     maxMB:
-                        MAX_FILE_SIZE /
-                        1024 /
-                        1024
+                        500
 
                 });
 
             }
 
-
-            return res.status(400).json({
-
-                error:
-                    error.message
-
-            });
-
         }
 
 
         if (
-            error
+            !res.headersSent
         ) {
 
-            console.error(
-                "Global error:",
-                error
-            );
-
-
-            return res.status(500).json({
+            return res.status(400).json({
 
                 error:
                     error.message ||
-                    "Internal server error."
+                    "Request failed."
 
             });
 
         }
 
 
-        next();
+        next(error);
 
     }
 );
@@ -1260,11 +1476,7 @@ app.listen(
         );
 
         console.log(
-            `Port: ${PORT}`
-        );
-
-        console.log(
-            `Upload directory: ${UPLOAD_DIR}`
+            `Version: 7.0.0`
         );
 
     }
