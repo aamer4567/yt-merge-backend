@@ -89,7 +89,7 @@ app.get("/video", async (req, res) => {
         const apiUrl =
             `https://${RAPIDAPI_HOST}/v2/video/details` +
             `?videoId=${encodeURIComponent(videoId)}` +
-            `&videos=auto&audios=auto`;
+            `&urlAccess=normal&videos=auto&audios=auto`;
 
 
         console.log("Fetching video details:", videoId);
